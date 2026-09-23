@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  uber-webhook:
+    build: .
+    container_name: uber_evolution_webhook
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
