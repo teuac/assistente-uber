@@ -24,85 +24,156 @@ logging.basicConfig(
 )
 logger = logging.getLogger("evolution_webhook")
 
-app = FastAPI(
-    title="Evolution API -> Google Sheets Monitor",
-    description="Servidor Webhook para monitorar mensagens de reembolso/viagem no WhatsApp via Evolution API e registrar no Google Sheets",
-    version="1.2.0"
-)
+from contextlib import asynccontextmanager
+
 
 # Instância Global do Cliente Google Sheets
 sheets_client = GoogleSheetsClient()
 
-# Fila assíncrona em memória para acumulação e envio em lote
-reimbursement_queue: asyncio.Queue = asyncio.Queue()
+# Fila assíncrona em memória (inicializada lazily dentro do event loop do servidor)
+reimbursement_queue: Optional[asyncio.Queue] = None
+
+
+
+def get_reimbursement_queue() -> asyncio.Queue:
+    """Garante que a fila asyncio.Queue esteja vinculada ao event loop ativo do Uvicorn/FastAPI."""
+    global reimbursement_queue
+    if reimbursement_queue is None:
+        reimbursement_queue = asyncio.Queue()
+    return reimbursement_queue
 
 
 async def reimbursement_worker():
     """
-    Worker assíncrono que roda continuamente em segundo plano.
-    Consome itens da fila `reimbursement_queue` em lote (batching).
-    Quando mensagens chegam em rajadas (ex: 60 mensagens de uma vez), 
-    o worker agrupa todas em um único `append_rows` no Google Sheets, 
-    garantindo que 100% dos dados sejam registrados em 1 única requisição HTTP!
+    Worker assíncrono com Cooldown (Debounce) de 15 segundos (configurável via config.COOLDOWN_SECONDS).
+    Toda vez que uma nova mensagem chega na fila, o temporizador de 15s é resetado.
+    Quando se passam 15 segundos sem nenhuma mensagem nova, o worker envia todo o lote acumulado ao Google Sheets 
+    em 1 única requisição HTTP.
+    
+    Regra de Resposta no WhatsApp:
+    - Se o lote contiver 1 mensagem: Responde citando/marcando a mensagem original com 'Viagem Registrada na Planilha ✅'.
+    - Se o lote contiver mais de 1 mensagem: Em vez de marcar 1 por 1, envia 1 ÚNICA mensagem no grupo confirmando a quantidade total.
     """
-    logger.info("Worker assíncrono de processamento em lote iniciado.")
+    cooldown = config.COOLDOWN_SECONDS
+    logger.info(f"Worker assíncrono iniciado com Cooldown de {cooldown}s (reset dinâmico por nova mensagem).")
+    queue = get_reimbursement_queue()
+
     while True:
         try:
-            # Aguarda a primeira mensagem chegar na fila
-            first_item = await reimbursement_queue.get()
+            # 1. Aguarda a primeira mensagem da rajada chegar na fila
+            first_item = await queue.get()
             batch = [first_item]
+            loop = asyncio.get_running_loop()
+            last_activity = loop.time()
 
-            # Drena todas as outras mensagens acumuladas na fila de uma só vez (até um máximo de 100 por lote)
-            while not reimbursement_queue.empty() and len(batch) < 100:
-                try:
-                    next_item = reimbursement_queue.get_nowait()
-                    batch.append(next_item)
-                except asyncio.QueueEmpty:
+            logger.info(f"Primeira mensagem do lote recebida. Iniciando contagem de {cooldown}s de cooldown...")
+
+            # 2. Loop de Debounce: Reseta o temporizador toda vez que uma nova mensagem entra na fila
+            while True:
+                now = loop.time()
+                elapsed = now - last_activity
+                remaining = cooldown - elapsed
+
+                if remaining <= 0:
+                    # Se passaram 15s sem nenhuma mensagem nova, encerra a espera
                     break
 
-            logger.info(f"Worker processando lote de {len(batch)} mensagem(ns) de reembolso...")
+                try:
+                    # Aguarda a próxima mensagem por no máximo 'remaining' segundos
+                    next_item = await asyncio.wait_for(queue.get(), timeout=remaining)
+                    batch.append(next_item)
+                    last_activity = loop.time()  # Reseta os 15 segundos!
+                    logger.info(f"Nova mensagem recebida no lote (Total acumulado: {len(batch)}). Cooldown de {cooldown}s resetado!")
+                except asyncio.TimeoutError:
+                    # Estourou o tempo de 15s sem novas mensagens
+                    break
 
-            # Prepara a lista de dicionários para inserção no Google Sheets em 1 única chamada de API
+            logger.info(f"Cooldown de {cooldown}s finalizado! Processando lote com {len(batch)} mensagem(ns) no Google Sheets...")
+
+            # 3. Insere todas as mensagens na planilha em 1 única requisição HTTP em thread pool separada
             data_list = [item["parsed_data"] for item in batch]
-
+            success = False
             try:
-                sheets_client.append_reimbursements_batch(data_list)
+                await asyncio.to_thread(sheets_client.append_reimbursements_batch, data_list)
+                success = True
             except Exception as e:
                 logger.error(f"Erro ao inserir lote de {len(batch)} mensagens no Google Sheets: {e}", exc_info=True)
-                # Fallback: tenta salvar individualmente se a requisição em lote falhar
+                # Fallback: Tenta salvar individualmente se o lote falhar por qualquer motivo
                 for item in batch:
                     try:
-                        sheets_client.append_reimbursement(item["parsed_data"])
+                        await asyncio.to_thread(sheets_client.append_reimbursement, item["parsed_data"])
+                        success = True
                     except Exception as ex:
                         logger.error(f"Erro no fallback individual para {item['parsed_data'].get('funcionario')}: {ex}")
 
-            # Envia a confirmação no WhatsApp para cada mensagem do lote
-            for item in batch:
-                remote_jid = item.get("remote_jid")
-                message_key = item.get("message_key")
-                message_obj = item.get("message_obj")
-                if remote_jid and message_key:
-                    try:
-                        send_whatsapp_confirmation(remote_jid, message_key, message_obj)
-                    except Exception as e:
-                        logger.warning(f"Erro ao enviar confirmação de WhatsApp para {remote_jid}: {e}")
+            # 4. Envio de Confirmação no WhatsApp
+            if success:
+                remote_jid = batch[0].get("remote_jid")
 
-                reimbursement_queue.task_done()
+                if len(batch) == 1:
+                    # Apenas 1 mensagem recebida: marca/cita a mensagem original no WhatsApp
+                    item = batch[0]
+                    message_key = item.get("message_key")
+                    message_obj = item.get("message_obj")
+                    if remote_jid and message_key:
+                        try:
+                            await asyncio.to_thread(send_whatsapp_confirmation, remote_jid, message_key, message_obj)
+                        except Exception as e:
+                            logger.warning(f"Erro ao enviar confirmação citada no WhatsApp: {e}")
+                else:
+                    # Múltiplas mensagens (2 ou mais): envia UMA ÚNICA mensagem no grupo confirmando a quantidade enviada
+                    count = len(batch)
+                    total_val = sum(
+                        excel_generator._clean_price_value(r["parsed_data"].get("valor", ""))
+                        for r in batch
+                    )
+                    val_formatted = f"R$ {total_val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+                    group_summary = (
+                        f"✅ *{count} viagens foram registradas com sucesso na planilha!*\n\n"
+                        f"📊 *Lote Processado:* {count} lançamentos\n"
+                        f"💰 *Valor Total do Lote:* {val_formatted}"
+                    )
+                    if remote_jid:
+                        try:
+                            await asyncio.to_thread(send_whatsapp_text, remote_jid, group_summary)
+                            logger.info(f"Mensagem resumida enviada ao grupo para o lote de {count} mensagens.")
+                        except Exception as e:
+                            logger.warning(f"Erro ao enviar mensagem de resumo do lote no WhatsApp: {e}")
+
+            # Desmarca as tarefas da fila
+            for _ in range(len(batch)):
+                queue.task_done()
 
         except Exception as e:
-            logger.error(f"Erro no worker de reembolso: {e}", exc_info=True)
+            logger.error(f"Erro inesperado no worker de reembolso: {e}", exc_info=True)
             await asyncio.sleep(1.0)
 
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gerenciador do ciclo de vida da aplicação FastAPI."""
     logger.info("Iniciando servidor Webhook da Evolution API...")
     if not config.SPREADSHEET_ID:
         logger.warning(
             "ATENÇÃO: SPREADSHEET_ID não está configurado no arquivo .env. Configure para habilitar o registro na planilha."
         )
-    # Inicia o worker de lote em segundo plano no mesmo loop de eventos do FastAPI
-    asyncio.create_task(reimbursement_worker())
+
+    # Inicializa a fila dentro do event loop ativo do servidor
+    get_reimbursement_queue()
+    worker_task = asyncio.create_task(reimbursement_worker())
+
+    yield
+
+    worker_task.cancel()
+
+
+app = FastAPI(
+    title="Evolution API -> Google Sheets Monitor",
+    description="Servidor Webhook para monitorar mensagens de reembolso/viagem no WhatsApp via Evolution API e registrar no Google Sheets",
+    version="1.2.0",
+    lifespan=lifespan
+)
 
 
 def send_whatsapp_text(remote_jid: str, text: str, max_retries: int = 3) -> bool:
@@ -371,12 +442,14 @@ async def receive_webhook(
     logger.info(f"Mensagem válida identificada! Funcionário: {parsed_data.get('funcionario')}, Valor: {parsed_data.get('valor')}")
 
     # Adiciona a mensagem na fila do worker assíncrono para processamento em lote
-    await reimbursement_queue.put({
+    queue = get_reimbursement_queue()
+    await queue.put({
         "remote_jid": remote_jid,
         "message_key": message_key,
         "message_obj": message_obj,
         "parsed_data": parsed_data
     })
+    logger.info(f"Mensagem enfileirada com sucesso! Tamanho atual da fila de lote: {queue.qsize()}")
 
     return JSONResponse(
         status_code=200,

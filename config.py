@@ -24,6 +24,9 @@ SHEET_NAME = os.getenv("SHEET_NAME", "Página1")
 # Filtro de grupo opcional (ex: 12036301234567890@g.us)
 TARGET_GROUP_JID = os.getenv("TARGET_GROUP_JID", "").strip()
 
+# Cooldown em segundos para acumular mensagens em lote antes de enviar ao Google Sheets (padrão: 15s)
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "15"))
+
 
 def get_google_credentials_dict() -> dict:
     """
