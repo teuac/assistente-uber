@@ -38,7 +38,12 @@ HEADERS = [
 ]
 
 
+import time
+import threading
+
 class GoogleSheetsClient:
+    _lock = threading.Lock()
+
     def __init__(self):
         self.client = None
         self.spreadsheet = None
@@ -106,11 +111,12 @@ class GoogleSheetsClient:
             except Exception as e:
                 logger.warning(f"Não foi possível aplicar estilização avançada: {e}")
 
-    def append_reimbursement(self, data: Dict[str, str]) -> bool:
-        """Insere uma nova linha na planilha com os dados formatados na nova ordem solicitada."""
-        if not self.worksheet:
-            self.connect()
-
+    def append_reimbursement(self, data: Dict[str, str], max_retries: int = 5) -> bool:
+        """
+        Insere uma nova linha na planilha com os dados formatados.
+        Possui trava de concorrência (thread-safe) e sistema de tentativas (retries) com backoff exponencial 
+        para tratar de forma transparente os limites de taxa (Rate Limit / 429) da Google Sheets API.
+        """
         now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
         row = [
@@ -126,6 +132,27 @@ class GoogleSheetsClient:
             now_str,
         ]
 
-        self.worksheet.append_row(row, value_input_option="USER_ENTERED")
-        logger.info(f"Linha registrada com sucesso para {data.get('funcionario')}.")
-        return True
+        delay = 1.5
+        for attempt in range(1, max_retries + 1):
+            try:
+                with self._lock:
+                    if not self.worksheet:
+                        self.connect()
+                    
+                    self.worksheet.append_row(row, value_input_option="USER_ENTERED")
+                    # Pequena pausa estratégica para respeitar a cota por segundo do Google Sheets API
+                    time.sleep(0.3)
+                
+                logger.info(f"Linha registrada com sucesso no Google Sheets para: {data.get('funcionario')}")
+                return True
+
+            except Exception as e:
+                logger.warning(f"Tentativa {attempt}/{max_retries} falhou ao inserir no Google Sheets ({data.get('funcionario')}): {e}")
+                # Força reconexão na próxima tentativa se tiver sido erro de autenticação ou socket drop
+                self.worksheet = None
+                if attempt == max_retries:
+                    logger.error(f"Todas as {max_retries} tentativas no Google Sheets falharam para {data.get('funcionario')}: {e}")
+                    raise e
+                time.sleep(delay)
+                delay *= 2  # Backoff exponencial: 1.5s, 3s, 6s, 12s...
+

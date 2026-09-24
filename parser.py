@@ -39,16 +39,19 @@ def extract_message_info(payload: dict) -> Tuple[Optional[str], Optional[str], b
 
 def parse_reimbursement_message(text: str) -> Optional[Dict[str, str]]:
     """
-    Analisa o texto recebido e extrai os campos de acordo com o modelo:
+    Analisa o texto recebido e extrai os campos de acordo com o modelo de viagem/reembolso.
+    Suporta negrito do WhatsApp (*campo:*), variações de maiúsculas/minúsculas e acentuação.
 
-    Data: 21/09/2026
-    Horário: 08:38 horas 
-    Funcionário: Luiz Fernando
-    Motivo: Ida ao Galpão para realização de atividades de manutenção.
-    Origem: Grand View 
-    Destino: Galpão - AC Engenharia 
-    Valor da viagem: R$ 28,96
-    Centro de custo: Assistência Técnica
+    Campos aceitos:
+    - Data
+    - Horário / Horario
+    - Funcionário / Funcionario / Colaborador
+    - Motivo
+    - Origem
+    - Parada
+    - Destino
+    - Valor da viagem / Valor
+    - Centro de custo / Centro de Custo
 
     Retorna um dicionário com os dados extraídos ou None se a mensagem não corresponder ao modelo.
     """
@@ -56,22 +59,24 @@ def parse_reimbursement_message(text: str) -> Optional[Dict[str, str]]:
         return None
 
     patterns = {
-        "data": r"Data:\s*(.+)",
-        "horario": r"Hor[áa]rio:\s*(.+)",
-        "funcionario": r"Funcion[áa]rio:\s*(.+)",
-        "motivo": r"Motivo:\s*(.+)",
-        "origem": r"Origem:\s*(.+)",
-        "parada": r"Parada:\s*(.+)",
-        "destino": r"Destino:\s*(.+)",
-        "valor": r"Valor da viagem:\s*(.+)",
-        "centro_custo": r"Centro de custo:\s*(.+)",
+        "data": r"(?:\*?\s*)Data(?:\s*\*?):\s*(.+)",
+        "horario": r"(?:\*?\s*)Hor[áa]rio(?:\s*\*?):\s*(.+)",
+        "funcionario": r"(?:\*?\s*)(?:Funcion[áa]rio|Colaborador)(?:\s*\*?):\s*(.+)",
+        "motivo": r"(?:\*?\s*)Motivo(?:\s*\*?):\s*(.+)",
+        "origem": r"(?:\*?\s*)Origem(?:\s*\*?):\s*(.+)",
+        "parada": r"(?:\*?\s*)Parada(?:\s*\*?):\s*(.+)",
+        "destino": r"(?:\*?\s*)Destino(?:\s*\*?):\s*(.+)",
+        "valor": r"(?:\*?\s*)Valor(?:\s+da\s+viagem)?(?:\s*\*?):\s*(.+)",
+        "centro_custo": r"(?:\*?\s*)Centro\s+de\s+custo(?:\s*\*?):\s*(.+)",
     }
 
     extracted = {}
     for key, pattern in patterns.items():
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            extracted[key] = match.group(1).strip()
+            # Limpa asteriscos, sublinhados e espaços extras no valor extraído
+            value = match.group(1).strip().strip("*_").strip()
+            extracted[key] = value
         else:
             extracted[key] = ""
 
@@ -80,3 +85,4 @@ def parse_reimbursement_message(text: str) -> Optional[Dict[str, str]]:
         return extracted
 
     return None
+

@@ -41,9 +41,20 @@ SAMPLE_WEBHOOK_PAYLOAD = {
 }
 
 
+# Mensagem de teste 3: Formatada em negrito pelo WhatsApp (*Data:*, *Valor da viagem:*, etc)
+SAMPLE_MESSAGE_3 = """*Data:* 21/09/2026
+*Horário:* 08:38 horas 
+*Funcionário:* Carlos Alberto
+*Motivo:* Visita técnica ao cliente.
+*Origem:* Matriz
+*Destino:* Filial Sul
+*Valor da viagem:* R$ 45,50
+*Centro de custo:* Engenharia"""
+
+
 def run_tests():
     print("=" * 65)
-    print("TESTANDO PARSER DE MENSAGENS COM & SEM PARADA E ORDEM DE COLUNAS")
+    print("TESTANDO PARSER DE MENSAGENS E REGRAS DE CONCORRÊNCIA")
     print("=" * 65)
 
     # 1. Teste da Mensagem 1 (Sem Parada)
@@ -68,9 +79,19 @@ def run_tests():
     for k, v in parsed2.items():
         print(f"     * {k.upper()}: '{v}'")
 
+    # 3. Teste da Mensagem 3 (Com Negrito do WhatsApp)
+    print("\n3. Teste da Mensagem Com Negrito (*Campo:*):")
+    parsed3 = parse_reimbursement_message(SAMPLE_MESSAGE_3)
+    assert parsed3 is not None, "Falha ao parsear mensagem com negrito!"
+    assert parsed3["funcionario"] == "Carlos Alberto", f"Erro no funcionário: {parsed3['funcionario']}"
+    assert parsed3["valor"] == "R$ 45,50", f"Erro no valor: {parsed3['valor']}"
+    assert parsed3["data"] == "21/09/2026", f"Erro na data: {parsed3['data']}"
+    print("   [OK] Mensagem formatada em negrito parseada com sucesso!")
+
     print("\n TODOS OS TESTES PASSARAM COM SUCESSO!")
     print("=" * 65)
 
 
 if __name__ == "__main__":
     run_tests()
+

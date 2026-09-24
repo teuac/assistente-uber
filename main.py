@@ -36,14 +36,15 @@ def startup_event():
         )
 
 
-def send_whatsapp_confirmation(remote_jid: str, message_key: dict, message_obj: dict):
-    """Envia a mensagem 'Viagem Registrada na Planilha' marcando/citando a mensagem original via Evolution API."""
+def send_whatsapp_confirmation(remote_jid: str, message_key: dict, message_obj: dict, max_retries: int = 3):
+    """Envia a mensagem 'Viagem Registrada na Planilha' marcando/citando a mensagem original via Evolution API com retries."""
     if not (config.EVOLUTION_API_URL and config.EVOLUTION_API_KEY and config.EVOLUTION_INSTANCE_NAME):
         logger.warning("Credenciais da Evolution API não estão totalmente configuradas no .env. Não será possível enviar a resposta no grupo.")
         return
 
     import json
     import urllib.request
+    import time
 
     endpoint = f"{config.EVOLUTION_API_URL}/message/sendText/{config.EVOLUTION_INSTANCE_NAME}"
     headers = {
@@ -60,18 +61,24 @@ def send_whatsapp_confirmation(remote_jid: str, message_key: dict, message_obj: 
         }
     }
 
-    try:
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
-        with urllib.request.urlopen(req) as response:
-            if response.status in (200, 201):
-                logger.info(f"Resposta 'Viagem Registrada na Planilha' enviada marcando a mensagem original em {remote_jid}")
-    except Exception as e:
-        logger.error(f"Erro ao enviar resposta citada via Evolution API: {e}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status in (200, 201):
+                    logger.info(f"Resposta 'Viagem Registrada na Planilha' enviada marcando a mensagem original em {remote_jid}")
+                    return
+        except Exception as e:
+            logger.warning(f"Tentativa {attempt}/{max_retries} de enviar confirmação no WhatsApp falhou: {e}")
+            if attempt < max_retries:
+                time.sleep(1.0)
+            else:
+                logger.error(f"Erro ao enviar resposta citada via Evolution API após {max_retries} tentativas: {e}")
 
 
 def process_and_log_message(remote_jid: str, message_key: dict, message_obj: dict, parsed_data: dict):
@@ -81,7 +88,7 @@ def process_and_log_message(remote_jid: str, message_key: dict, message_obj: dic
         if remote_jid and message_key:
             send_whatsapp_confirmation(remote_jid, message_key, message_obj)
     except Exception as e:
-        logger.error(f"Erro ao registrar mensagem na planilha Google Sheets: {e}", exc_info=True)
+        logger.error(f"Erro ao processar e registrar mensagem na planilha Google Sheets: {e}", exc_info=True)
 
 
 @app.get("/")
@@ -147,7 +154,8 @@ async def receive_webhook(
     parsed_data = parse_reimbursement_message(text)
 
     if not parsed_data:
-        logger.debug("Mensagem recebida não coincide com o modelo de viagem esperado.")
+        snippet = text.replace('\n', ' ')[:100]
+        logger.warning(f"Mensagem ignorada por formato não reconhecido (Primeiros 100 caracteres): '{snippet}'")
         return JSONResponse(
             status_code=200,
             content={"status": "ignored", "reason": "Formato de mensagem não reconhecido"}
