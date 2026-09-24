@@ -1,5 +1,8 @@
 import re
-from typing import Dict, Optional, Tuple
+import calendar
+from datetime import datetime, date
+from typing import Dict, Optional, Tuple, Any
+
 
 
 def extract_message_info(payload: dict) -> Tuple[Optional[str], Optional[str], bool, dict, dict]:
@@ -112,11 +115,8 @@ def parse_export_command(text: str) -> Optional[Dict[str, Any]]:
     if not text or not isinstance(text, str):
         return None
 
-    import calendar
-    from datetime import datetime, date
-    from typing import Any
-
     text_stripped = text.strip()
+
 
     # Verifica se começa com o prefixo K/ ou k/ (com ou sem espaço)
     prefix_match = re.match(r"^[kK]\s*/\s*(.*)", text_stripped, re.DOTALL | re.IGNORECASE)
