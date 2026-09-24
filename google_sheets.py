@@ -156,3 +156,103 @@ class GoogleSheetsClient:
                 time.sleep(delay)
                 delay *= 2  # Backoff exponencial: 1.5s, 3s, 6s, 12s...
 
+    def append_reimbursements_batch(self, data_list: List[Dict[str, str]], max_retries: int = 5) -> bool:
+        """
+        Insere MÚLTIPLAS linhas na planilha em UMA ÚNICA REQUISIÇÃO HTTP à API do Google Sheets.
+        Reduz drasticamente o número de chamadas de API de N para 1, evitando estourar cotas ou rate limits.
+        """
+        if not data_list:
+            return True
+
+        rows = []
+        now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+        for data in data_list:
+            row = [
+                data.get("motivo", ""),
+                data.get("data", ""),
+                data.get("horario", ""),
+                data.get("funcionario", ""),
+                data.get("origem", ""),
+                data.get("parada", ""),
+                data.get("destino", ""),
+                data.get("valor", ""),
+                data.get("centro_custo", ""),
+                now_str,
+            ]
+            rows.append(row)
+
+        delay = 1.5
+        for attempt in range(1, max_retries + 1):
+            try:
+                with self._lock:
+                    if not self.worksheet:
+                        self.connect()
+
+                    self.worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+                    time.sleep(0.3)
+
+                logger.info(f"Lote de {len(rows)} linhas registrado com SUCESSO no Google Sheets em 1 única requisição!")
+                return True
+
+            except Exception as e:
+                logger.warning(f"Tentativa {attempt}/{max_retries} falhou ao inserir lote ({len(rows)} itens) no Google Sheets: {e}")
+                self.worksheet = None
+                if attempt == max_retries:
+                    logger.error(f"Todas as {max_retries} tentativas de inserção em lote falharam: {e}")
+                    raise e
+                time.sleep(delay)
+                delay *= 2
+
+        return False
+
+
+    def fetch_all_records(self) -> List[Dict[str, str]]:
+        """Lê todas as linhas salvas na planilha do Google Sheets e retorna como uma lista de dicionários."""
+        with self._lock:
+            if not self.worksheet:
+                self.connect()
+
+            all_values = self.worksheet.get_all_values()
+
+        if not all_values or len(all_values) <= 1:
+            return []
+
+        headers = [h.strip() for h in all_values[0]]
+        records = []
+        for row in all_values[1:]:
+            padded_row = row + [""] * (len(headers) - len(row))
+            record = {headers[i]: padded_row[i].strip() for i in range(len(headers))}
+            records.append(record)
+
+        return records
+
+
+def filter_records_by_date_range(
+    records: List[Dict[str, str]], 
+    start_date: Any, 
+    end_date: Any
+) -> List[Dict[str, str]]:
+    """Filtra os registros onde a coluna 'Data' se encontra dentro do intervalo especificado [start_date, end_date]."""
+    filtered = []
+    for r in records:
+        raw_date_str = r.get("Data", "").strip()
+        if not raw_date_str:
+            reg_str = r.get("Data de Registro", "")
+            raw_date_str = reg_str.split()[0] if reg_str else ""
+
+        parsed_d = None
+        for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+            try:
+                parsed_d = datetime.strptime(raw_date_str, fmt).date()
+                break
+            except (ValueError, TypeError):
+                pass
+
+        if parsed_d:
+            if start_date <= parsed_d <= end_date:
+                filtered.append(r)
+
+    return filtered
+
+
