@@ -93,7 +93,7 @@ def create_styled_reimbursement_excel(
     # 1. Título Principal (Linhas 1 e 2)
     ws.merge_cells("A1:J1")
     title_cell = ws["A1"]
-    title_cell.value = "RELATÓRIO MENSAL DE VIAGENS E REEMBOLSOS"
+    title_cell.value = "RELATÓRIO MENSAL DE VIAGENS"
     title_cell.font = font_title
     title_cell.fill = fill_title
     title_cell.alignment = align_center
@@ -214,13 +214,110 @@ def create_styled_reimbursement_excel(
     val_cell.number_format = 'R$ #,##0.00'
     val_cell.alignment = align_right
 
-    # 6. Ajuste Automático de Largura das Colunas
+    # 6. Quadrinho de Resumo por Centro de Custo (abaixo da tabela principal)
+    from collections import defaultdict
+
+    cc_data = defaultdict(lambda: {"count": 0, "total": 0.0})
+    for r in records:
+        cc_name = r.get("Centro de Custo", r.get("centro_custo", "")).strip() or "Não Informado"
+        v_float = _clean_price_value(r.get("Valor da Viagem", r.get("valor", "")))
+        cc_data[cc_name]["count"] += 1
+        cc_data[cc_name]["total"] += v_float
+
+    # Ordena pelos centros de custo com maior valor gasto
+    sorted_cc = sorted(cc_data.items(), key=lambda x: x[1]["total"], reverse=True)
+
+    cc_box_start = current_row + 3
+    ws.merge_cells(f"B{cc_box_start}:E{cc_box_start}")
+    cc_title = ws[f"B{cc_box_start}"]
+    cc_title.value = "RESUMO DE GASTOS POR CENTRO DE CUSTO"
+    cc_title.font = Font(name=FONT_FAMILY, size=11, bold=True, color="FFFFFF")
+    cc_title.fill = fill_title
+    cc_title.alignment = align_center
+    ws.row_dimensions[cc_box_start].height = 26
+
+    cc_headers = [
+        ("Centro de Custo", align_left),
+        ("Qtd. Viagens", align_center),
+        ("Valor Total", align_right),
+        ("% do Total", align_center),
+    ]
+
+    cc_header_row = cc_box_start + 1
+    ws.row_dimensions[cc_header_row].height = 22
+    for idx, (h_name, h_align) in enumerate(cc_headers, start=2):
+        c = ws.cell(row=cc_header_row, column=idx, value=h_name)
+        c.font = font_header
+        c.fill = fill_header
+        c.alignment = h_align
+        c.border = border_data
+
+    cc_curr_row = cc_header_row + 1
+    first_cc_row = cc_curr_row
+    for idx, (cc_name, info) in enumerate(sorted_cc):
+        ws.row_dimensions[cc_curr_row].height = 20
+        row_fill = fill_even if idx % 2 == 0 else fill_odd
+        pct = (info["total"] / total_valor) if total_valor > 0 else 0.0
+
+        c_name = ws.cell(row=cc_curr_row, column=2, value=cc_name)
+        c_name.alignment = align_left
+        c_name.font = font_data
+        c_name.fill = row_fill
+        c_name.border = border_data
+
+        c_cnt = ws.cell(row=cc_curr_row, column=3, value=info["count"])
+        c_cnt.alignment = align_center
+        c_cnt.font = font_data
+        c_cnt.fill = row_fill
+        c_cnt.border = border_data
+
+        c_val = ws.cell(row=cc_curr_row, column=4, value=info["total"])
+        c_val.alignment = align_right
+        c_val.font = font_data
+        c_val.fill = row_fill
+        c_val.border = border_data
+        c_val.number_format = 'R$ #,##0.00'
+
+        c_pct = ws.cell(row=cc_curr_row, column=5, value=pct)
+        c_pct.alignment = align_center
+        c_pct.font = font_data
+        c_pct.fill = row_fill
+        c_pct.border = border_data
+        c_pct.number_format = '0.0%'
+
+        cc_curr_row += 1
+
+    # Linha de Total do Centro de Custo
+    ws.row_dimensions[cc_curr_row].height = 24
+    for c_idx in range(2, 6):
+        c = ws.cell(row=cc_curr_row, column=c_idx)
+        c.font = font_total
+        c.fill = fill_total
+        c.border = border_total
+
+    ws.cell(row=cc_curr_row, column=2, value="TOTAL").alignment = align_left
+    if sorted_cc:
+        ws.cell(row=cc_curr_row, column=3, value=f"=SUM(C{first_cc_row}:C{cc_curr_row - 1})").alignment = align_center
+        c_sum = ws.cell(row=cc_curr_row, column=4, value=f"=SUM(D{first_cc_row}:D{cc_curr_row - 1})")
+        c_sum.number_format = 'R$ #,##0.00'
+        c_sum.alignment = align_right
+        c_pct_tot = ws.cell(row=cc_curr_row, column=5, value=f"=SUM(E{first_cc_row}:E{cc_curr_row - 1})")
+        c_pct_tot.number_format = '0.0%'
+        c_pct_tot.alignment = align_center
+    else:
+        ws.cell(row=cc_curr_row, column=3, value=0).alignment = align_center
+        c_sum = ws.cell(row=cc_curr_row, column=4, value=0.0)
+        c_sum.number_format = 'R$ #,##0.00'
+        c_sum.alignment = align_right
+        ws.cell(row=cc_curr_row, column=5, value=0.0).alignment = align_center
+
+    # 7. Ajuste Automático de Largura das Colunas
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
         for cell in col:
-            # Ignora células mescladas no título e cards para o cálculo da largura
-            if cell.row in (1, 2, 4, 5):
+            # Ignora células mescladas no título, cards e título do centro de custo
+            if cell.row in (1, 2, 4, 5, cc_box_start):
                 continue
             if cell.value:
                 val_str = str(cell.value)
@@ -239,3 +336,4 @@ def create_styled_reimbursement_excel(
 
     wb.save(filepath)
     return filepath
+
