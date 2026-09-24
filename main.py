@@ -224,7 +224,7 @@ def send_whatsapp_file(remote_jid: str, file_path: str, filename: str, caption: 
         logger.error(f"Erro ao ler arquivo para envio no WhatsApp: {e}")
         return False
 
-    media_data = f"data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{encoded_media}"
+    media_data = encoded_media
     endpoint = f"{config.EVOLUTION_API_URL}/message/sendMedia/{config.EVOLUTION_INSTANCE_NAME}"
     headers = {
         "Content-Type": "application/json",
@@ -252,6 +252,13 @@ def send_whatsapp_file(remote_jid: str, file_path: str, filename: str, caption: 
                 if response.status in (200, 201):
                     logger.info(f"Arquivo '{filename}' enviado com sucesso via WhatsApp para {remote_jid}")
                     return True
+        except urllib.error.HTTPError as e:
+            err_details = e.read().decode('utf-8', errors='ignore')
+            logger.warning(f"Tentativa {attempt}/{max_retries} falhou com status {e.code}: {err_details}")
+            if attempt < max_retries:
+                time.sleep(1.5)
+            else:
+                logger.error(f"Erro HTTP {e.code} ao enviar arquivo via Evolution API: {err_details}")
         except Exception as e:
             logger.warning(f"Tentativa {attempt}/{max_retries} de enviar arquivo via Evolution API falhou: {e}")
             if attempt < max_retries:
@@ -260,6 +267,7 @@ def send_whatsapp_file(remote_jid: str, file_path: str, filename: str, caption: 
                 logger.error(f"Erro ao enviar arquivo via Evolution API após {max_retries} tentativas: {e}")
 
     return False
+
 
 
 def send_whatsapp_confirmation(remote_jid: str, message_key: dict, message_obj: dict, max_retries: int = 3):
